@@ -25,7 +25,6 @@ class ImageAugmenter:
     ):
         """
         Initialize the ImageAugmenter.
-
         Args:
             augmentations_per_image: Number of augmented versions per original image.
             seed: Random seed for reproducibility.

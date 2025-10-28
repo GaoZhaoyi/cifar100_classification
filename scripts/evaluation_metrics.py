@@ -116,7 +116,7 @@ def plot_calibration_curve(true_labels, probabilities, class_names, n_bins=10):
     plt.grid(True, alpha=0.3)
 
 
-def evaluate_model(model, dataloader, criterion, device):
+def evaluate_model(model, dataloader, criterion, device, dataset_type="CIFAR-10"):
     """
     Evaluate the model on a dataset
     Args:
@@ -124,6 +124,7 @@ def evaluate_model(model, dataloader, criterion, device):
         dataloader: DataLoader for evaluation data
         criterion: Loss function
         device: Device to evaluate on
+        dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
     Returns:
         loss: Average loss
         accuracy: Accuracy percentage
@@ -141,7 +142,7 @@ def evaluate_model(model, dataloader, criterion, device):
     all_probs = []
 
     with torch.no_grad():
-        progress_bar = tqdm(dataloader, desc="Evaluation", leave=False)
+        progress_bar = tqdm(dataloader, desc=f"Evaluation ({dataset_type})", leave=False)
 
         for inputs, labels in progress_bar:
             inputs, labels = inputs.to(device), labels.to(device)
@@ -192,7 +193,7 @@ def plot_confusion_matrix(true_labels, pred_labels, class_names):
     cm = confusion_matrix(true_labels, pred_labels)
     cm_normalized = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
 
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(12, 10))  # Increased size for CIFAR-100
     sns.heatmap(
         cm_normalized,
         annot=True,
@@ -204,8 +205,8 @@ def plot_confusion_matrix(true_labels, pred_labels, class_names):
     plt.title("Normalized Confusion Matrix")
     plt.ylabel("True Label")
     plt.xlabel("Predicted Label")
-    plt.xticks(rotation=45)
-    plt.yticks(rotation=0)
+    plt.xticks(rotation=45, fontsize=8)  # Smaller font for many classes
+    plt.yticks(rotation=0, fontsize=8)
 
 
 def plot_roc_curves(true_labels, probabilities, class_names):
@@ -229,10 +230,12 @@ def plot_roc_curves(true_labels, probabilities, class_names):
         roc_auc[i] = auc(fpr[i], tpr[i])
 
     # Plot all ROC curves
-    plt.figure()
-    colors = plt.cm.get_cmap("tab10", len(class_names))
+    plt.figure(figsize=(12, 10))  # Increased size for CIFAR-100
+    colors = plt.cm.get_cmap("tab20", min(len(class_names), 20))  # More colors for CIFAR-100
 
-    for i, color in zip(range(len(class_names)), colors(range(len(class_names)))):
+    # Plot a subset of classes for better visualization (first 20 classes)
+    num_classes_to_plot = min(20, len(class_names))
+    for i, color in zip(range(num_classes_to_plot), colors(range(num_classes_to_plot))):
         plt.plot(
             fpr[i],
             tpr[i],
@@ -247,7 +250,7 @@ def plot_roc_curves(true_labels, probabilities, class_names):
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
     plt.title("Receiver Operating Characteristic (ROC) Curves")
-    plt.legend(loc="lower right")
+    plt.legend(loc="lower right", fontsize=8)  # Smaller font for many classes
 
 
 def visualize_predictions(model, dataloader, device, class_names, num_samples=10):
@@ -281,8 +284,8 @@ def visualize_predictions(model, dataloader, device, class_names, num_samples=10
                     )
 
                 if (
-                    len(correct_samples) >= num_samples
-                    and len(incorrect_samples) >= num_samples
+                        len(correct_samples) >= num_samples
+                        and len(incorrect_samples) >= num_samples
                 ):
                     break
             else:
@@ -314,3 +317,51 @@ def visualize_predictions(model, dataloader, device, class_names, num_samples=10
     plt.tight_layout()
     plt.savefig("results/incorrect_predictions.png")
     plt.show()
+
+
+def calculate_per_class_accuracy(true_labels, pred_labels, class_names):
+    """
+    Calculate per-class accuracy for detailed performance analysis
+    Args:
+        true_labels: True labels
+        pred_labels: Predicted labels
+        class_names: List of class names
+    Returns:
+        Dictionary with per-class accuracies
+    """
+    cm = confusion_matrix(true_labels, pred_labels)
+    per_class_accuracy = {}
+
+    for i, class_name in enumerate(class_names):
+        if cm[i, :].sum() > 0:
+            accuracy = cm[i, i] / cm[i, :].sum()
+            per_class_accuracy[class_name] = accuracy
+        else:
+            per_class_accuracy[class_name] = 0.0
+
+    return per_class_accuracy
+
+
+def plot_top_k_accuracy(true_labels, probabilities, class_names, max_k=10):
+    """
+    Plot top-k accuracy for different values of k
+    Args:
+        true_labels: True labels
+        probabilities: Prediction probabilities for each class
+        class_names: List of class names
+        max_k: Maximum k value to evaluate
+    """
+    k_values = list(range(1, min(max_k + 1, len(class_names))))
+    accuracies = []
+
+    for k in k_values:
+        acc = top_k_accuracy(true_labels, probabilities, k)
+        accuracies.append(acc)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(k_values, accuracies, 'o-', linewidth=2, markersize=8)
+    plt.xlabel('Top-K')
+    plt.ylabel('Accuracy (%)')
+    plt.title('Top-K Accuracy')
+    plt.grid(True, alpha=0.3)
+    plt.xticks(k_values)
