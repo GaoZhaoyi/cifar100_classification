@@ -105,18 +105,23 @@ class ImageAugmenter:
         input_path = Path(input_dir)
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        count = 0
+        total_augmented = 0  # 累计增强图像数量
 
         image_files = self._find_image_files(input_path)
+        total_images = len(image_files)  # 总图像数量
 
-        logger.info(f"Found {len(image_files)} images to augment.")
+        logger.info(f"Found {total_images} images to augment. Starting processing...")
 
-        for img_path in image_files:
+        for idx, img_path in enumerate(image_files, 1):  # idx从1开始计数
             try:
                 image = Image.open(img_path).convert("RGB")
             except Exception as e:
                 logger.warning(f"Failed to load image {img_path}: {e}")
                 continue
+
+            # 打印当前处理的图像（每10张或最后一张时提示进度）
+            if idx % 1000 == 0 or idx == total_images: \
+                logger.info(f"Progress: {idx}/{total_images} images processed, {total_augmented} augmented images generated")
 
             # Determine output subdirectory
             rel_dir = img_path.parent.relative_to(input_path)
@@ -134,10 +139,10 @@ class ImageAugmenter:
                 augmented = self.augment_image(image.copy())
                 aug_name = f"aug_{i}_{img_path.name}"
                 augmented.save(target_dir / aug_name)
-                count += 1
+                total_augmented += 1
 
         logger.info(
-            f"Augmentation of {count} images completed. Output saved to: {output_dir}"
+            f"Augmentation completed! Total processed images: {total_images}, Total augmented images generated: {total_augmented}. Output saved to: {output_dir}"
         )
 
     def _find_image_files(self, root: Path) -> List[Path]:
