@@ -145,7 +145,7 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
     # Adjust optimizer settings for CIFAR-100 (more classes require different optimization)
     if dataset_type == "CIFAR-100":
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)     # T_max 需要设置为训练轮数
     else:
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)

@@ -276,7 +276,7 @@ def train(args, model: nn.Module):
 
             # 检查过拟合（训练准确率比验证准确率高太多）
             train_val_gap = train_acc - val_acc
-            if train_val_gap > 15.0 and epoch > 40:  # 训练和验证准确率差距超过20%
+            if train_val_gap > 15.0 and epoch > args.num_epochs-25:  # 训练和验证准确率差距超过15%
                 overfitting_counter += 1
                 print(f"  ⚠️  Overfitting detected! Gap: {train_val_gap:.2f}%")
                 if overfitting_counter >= max_overfitting_patience:
