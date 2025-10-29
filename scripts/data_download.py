@@ -9,6 +9,8 @@ from torchvision.datasets import CIFAR10, CIFAR100
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
 class CIFAR10Downloader:
     """
@@ -48,7 +50,7 @@ class CIFAR10Downloader:
             log_stats: Whether to log dataset statistics after loading.
         """
         self.root_dir = Path(root_dir)
-        self.transform = transform or self._get_default_transform()
+        self.transform = transform  # 不主动调用默认transform，由外部传入
         self.download = download
         self.log_stats = log_stats
 
@@ -56,14 +58,20 @@ class CIFAR10Downloader:
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _get_default_transform() -> transforms.Compose:
-        """Return default transform: ToTensor + Normalize to [-1, 1]."""
-        return transforms.Compose(
-            [
+    def _get_default_transform(is_train: bool = True) -> transforms.Compose:
+        """Return transform: 训练集含增强，测试集仅标准化"""
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ]
-        )
+            ])
+        else:
+            return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ])
 
     def load_datasets(self) -> Tuple[CIFAR10, CIFAR10]:
         """
@@ -76,12 +84,16 @@ class CIFAR10Downloader:
             RuntimeError: If dataset fails to download or load.
         """
         try:
+            # 若未传入transform，使用默认区分训练/测试的transform
+            train_transform = self.transform if self.transform else self._get_default_transform(is_train=True)
+            test_transform = self.transform if self.transform else self._get_default_transform(is_train=False)
+
             logger.info("Loading CIFAR-10 training dataset...")
             train_dataset = CIFAR10(
                 root=str(self.root_dir),
                 train=True,
                 download=self.download,
-                transform=self.transform,
+                transform=train_transform,
             )
 
             logger.info("Loading CIFAR-10 test dataset...")
@@ -89,7 +101,7 @@ class CIFAR10Downloader:
                 root=str(self.root_dir),
                 train=False,
                 download=self.download,
-                transform=self.transform,
+                transform=test_transform,
             )
 
         except Exception as e:
@@ -210,7 +222,7 @@ class CIFAR100Downloader:
             log_stats: Whether to log dataset statistics after loading.
         """
         self.root_dir = Path(root_dir)
-        self.transform = transform or self._get_default_transform()
+        self.transform = transform  # 不主动调用默认transform，由外部传入
         self.download = download
         self.log_stats = log_stats
 
@@ -218,14 +230,20 @@ class CIFAR100Downloader:
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _get_default_transform() -> transforms.Compose:
-        """Return default transform: ToTensor + Normalize to [-1, 1]."""
-        return transforms.Compose(
-            [
+    def _get_default_transform(is_train: bool = True) -> transforms.Compose:
+        """Return transform: 训练集含增强，测试集仅标准化"""
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ]
-        )
+                transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
+            ])
 
     def load_datasets(self) -> Tuple[CIFAR100, CIFAR100]:
         """
@@ -238,12 +256,16 @@ class CIFAR100Downloader:
             RuntimeError: If dataset fails to download or load.
         """
         try:
+            # 若未传入transform，使用默认区分训练/测试的transform
+            train_transform = self.transform if self.transform else self._get_default_transform(is_train=True)
+            test_transform = self.transform if self.transform else self._get_default_transform(is_train=False)
+
             logger.info("Loading CIFAR-100 training dataset...")
             train_dataset = CIFAR100(
                 root=str(self.root_dir),
                 train=True,
                 download=self.download,
-                transform=self.transform,
+                transform=train_transform,
             )
 
             logger.info("Loading CIFAR-100 test dataset...")
@@ -251,7 +273,7 @@ class CIFAR100Downloader:
                 root=str(self.root_dir),
                 train=False,
                 download=self.download,
-                transform=self.transform,
+                transform=test_transform,
             )
 
         except Exception as e:

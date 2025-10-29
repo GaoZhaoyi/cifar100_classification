@@ -26,6 +26,7 @@ from scripts.train_utils import (
     define_loss_and_optimizer,
     load_data,
     load_transforms,
+    EarlyStopping  # 导入早停类
 )
 from scripts.evaluation_metrics import (
     evaluate_model,
@@ -137,7 +138,7 @@ def parse_args():
 
 
 def collect_data(args):
-    """Collect data"""
+    """Collect data（传入区分训练/测试的transform）"""
     logger.info(f"Collecting {args.dataset} dataset...")
 
     # Create the directory for our raw data if it doesn't already exist
@@ -145,13 +146,21 @@ def collect_data(args):
     os.makedirs(args.data_dir + "/raw", exist_ok=True)
     print("Setup complete.")
 
+    # 训练集用增强变换，测试集用无增强变换
+    train_transform = load_transforms(is_train=True)
+    test_transform = load_transforms(is_train=False)
+
     if args.dataset == "cifar10":
         train_dataset, test_dataset = download_and_extract_cifar10_data(
             root_dir=args.data_dir + "/raw",
+            transform=None,  # 不使用全局transform，后续分别传入
+            save_images=True
         )
     else:
         train_dataset, test_dataset = download_and_extract_cifar100_data(
             root_dir=args.data_dir + "/raw",
+            transform=None,  # 不使用全局transform，后续分别传入
+            save_images=True
         )
 
 
@@ -190,13 +199,19 @@ def augment_data(args):
 
 
 def build_model(args):
-    """Build the model"""
+    """Build the model（启用预训练权重）"""
     if args.dataset == "cifar10":
         num_classes = 10
     else:
         num_classes = 100
     logger.info(f"Creating model with {num_classes} classes, {args.device} device...")
-    model = create_model(num_classes=num_classes, device=args.device, model_type=args.model_type)
+    # 对ResNet启用预训练权重，减少过拟合
+    model = create_model(
+        num_classes=num_classes,
+        device=args.device,
+        model_type=args.model_type,
+        pretrained=(args.model_type.startswith('resnet'))  # ResNet使用预训练权重
+    )
     return model
 
 
@@ -207,14 +222,19 @@ def train(args, model: nn.Module):
     # Define loss and optimizer
     criterion, optimizer, scheduler = define_loss_and_optimizer(model, args.lr, args.weight_decay, dataset_type)
 
+    # 初始化早停器（标准化早停逻辑）
+    early_stopping = EarlyStopping(
+        patience=args.early_stopping_patience,
+        min_delta=0.001  # 最小改进阈值，避免微小波动触发早停
+    )
+
     # Initialize tracking variables
     best_val_loss = float("inf")
     best_val_acc = 0.0
-    patience_counter = 0
 
     # 添加过拟合检测变量
     overfitting_counter = 0
-    max_overfitting_patience = 5
+    max_overfitting_patience = 5  # 连续5次过拟合则停止
 
     # Lists to store training history for later plotting
     train_losses = []
@@ -284,11 +304,16 @@ def train(args, model: nn.Module):
             print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
             print(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
 
+            # 早停检查
+            early_stopping(val_loss)
+            if early_stopping.early_stop:
+                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+                break
+
             # Check for improvement and save the best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_val_loss = val_loss
-                patience_counter = 0
                 save_checkpoint(
                     {
                         "epoch": epoch + 1,
@@ -301,16 +326,6 @@ def train(args, model: nn.Module):
                     args.output_dir + "/models/best_model.pth",
                 )
                 print("  ↳ Validation accuracy improved. Saving best model!")
-            else:
-                patience_counter += 1
-                print(
-                    f"  ↳ No improvement. Early stopping counter: {patience_counter}/{args.early_stopping_patience}"
-                )
-
-            # Check for early stopping
-            if patience_counter >= args.early_stopping_patience:
-                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
-                break
 
         else:
             # 只打印训练信息，不进行验证
@@ -359,9 +374,10 @@ def evaluate(args, model: nn.Module):
     # Determine dataset type
     dataset_type = "CIFAR-10" if args.dataset == "cifar10" else "CIFAR-100"
 
-    # Load the test dataset from the specified directory
+    # Load the test dataset from the specified directory（使用测试集变换）
     test_data_dir = args.data_dir + "/raw/test"
-    test_dataset = datasets.ImageFolder(root=test_data_dir, transform=load_transforms())
+    test_transform = load_transforms(is_train=False)
+    test_dataset = datasets.ImageFolder(root=test_data_dir, transform=test_transform)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Set the model to evaluation mode

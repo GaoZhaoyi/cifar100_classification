@@ -1,5 +1,4 @@
 import torch.nn as nn
-import torch.nn.functional as F
 import torchvision.models as models
 from torchvision.models import ResNet18_Weights, ResNet34_Weights, ResNet50_Weights
 
@@ -41,20 +40,19 @@ class SimpleCNN(nn.Module):
 
 class ResNetForCIFAR(nn.Module):
     """
-    Modified ResNet architecture for CIFAR datasets
+    Modified ResNet architecture for CIFAR datasets（添加正则化）
     """
 
-    def __init__(self, num_classes=10, resnet_type='resnet18'):
+    def __init__(self, num_classes=10, resnet_type='resnet18', pretrained=True):
         super(ResNetForCIFAR, self).__init__()
 
-        # 使用新的weights参数替代pretrained
+        # 加载预训练权重（默认使用ImageNet预训练，减少过拟合）
         if resnet_type == 'resnet18':
-            # 不使用预训练权重
-            self.resnet = models.resnet18(weights=None)
+            self.resnet = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         elif resnet_type == 'resnet34':
-            self.resnet = models.resnet34(weights=None)
+            self.resnet = models.resnet34(weights=ResNet34_Weights.IMAGENET1K_V1 if pretrained else None)
         elif resnet_type == 'resnet50':
-            self.resnet = models.resnet50(weights=None)
+            self.resnet = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if pretrained else None)
         else:
             raise ValueError(f"Unsupported ResNet type: {resnet_type}")
 
@@ -62,31 +60,36 @@ class ResNetForCIFAR(nn.Module):
         self.resnet.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.resnet.maxpool = nn.Identity()  # Remove maxpool for CIFAR
 
-        # Replace final classifier
-        if resnet_type in ['resnet18', 'resnet34']:
-            num_features = self.resnet.fc.in_features
-        else:  # resnet50
-            num_features = self.resnet.fc.in_features
+        # 分类器前添加Dropout层（正则化）
+        num_features = self.resnet.fc.in_features
+        self.resnet.fc = nn.Sequential(
+            nn.Dropout(p=0.5),  # 全连接层前添加Dropout，抑制过拟合
+            nn.Linear(num_features, num_classes)
+        )
 
-        self.resnet.fc = nn.Linear(num_features, num_classes)
+        # 可选：冻结前2层卷积（减少参数更新，适用于小数据集）
+        if pretrained and resnet_type == 'resnet50':
+            for param in list(self.resnet.parameters())[:20]:  # 冻结前20个参数组（约前2层）
+                param.requires_grad = False
 
     def forward(self, x):
         return self.resnet(x)
 
 
-def create_model(num_classes, device, model_type='simple'):
+def create_model(num_classes, device, model_type='simple', pretrained=True):
     """
-    Create and initialize the model
+    Create and initialize the model（新增pretrained参数）
 
     Args:
         num_classes: Number of classes (10 for CIFAR-10, 100 for CIFAR-100)
         device: Device to put model on
         model_type: Type of model ('simple', 'resnet18', 'resnet34', 'resnet50')
+        pretrained: Whether to use pretrained weights (only for ResNet)
     """
     if model_type == 'simple':
         model = SimpleCNN(num_classes=num_classes)
     elif model_type.startswith('resnet'):
-        model = ResNetForCIFAR(num_classes=num_classes, resnet_type=model_type)
+        model = ResNetForCIFAR(num_classes=num_classes, resnet_type=model_type, pretrained=pretrained)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 

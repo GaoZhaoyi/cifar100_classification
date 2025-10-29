@@ -38,9 +38,11 @@ class ImageAugmenter:
 
         self._set_seed()
 
-        # Define Albumentations pipeline
+        # Define Albumentations pipeline（新增RandomCrop和Cutout）
         self.transform = A.Compose(
             [
+                A.RandomCrop(height=28, width=28, pad_if_needed=True, p=0.8),  # 随机裁剪后自动填充回32x32
+                A.Resize(height=32, width=32),
                 A.Rotate(limit=15, p=0.8),
                 A.HorizontalFlip(p=0.5),
                 A.ShiftScaleRotate(
@@ -93,53 +95,84 @@ class ImageAugmenter:
         return Image.fromarray(augmented_image_np.astype(np.uint8))
 
     def process_directory(self, input_dir: str, output_dir: str) -> None:
-        """
-        Augment all images in input directory and save to output directory.
+        from pathlib import Path  # 确保导入Path库
+        import os
 
-        Preserves folder structure. Skips files that fail to load.
-
-        Args:
-            input_dir: Path to input directory with class subfolders.
-            output_dir: Path to output directory for augmented images.
-        """
         input_path = Path(input_dir)
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         total_augmented = 0  # 累计增强图像数量
 
-        image_files = self._find_image_files(input_path)
-        total_images = len(image_files)  # 总图像数量
-
-        logger.info(f"Found {total_images} images to augment. Starting processing...")
+        # 仅保留支持的图像后缀（避免非图像文件被误处理）
+        valid_extensions = ('.png', '.jpg', '.jpeg')
+        image_files = [
+            p for p in input_path.rglob('*')
+            if p.suffix.lower() in valid_extensions and p.is_file()
+        ]
+        total_images = len(image_files)  # 总原始图像数量
+        logger.info(f"Found {total_images} valid images to augment. Starting processing...")
 
         for idx, img_path in enumerate(image_files, 1):  # idx从1开始计数
+            # 每1000张或最后一张时提示进度（与原逻辑一致）
+            if idx % 1000 == 0 or idx == total_images:
+                logger.info(
+                    f"Progress: {idx}/{total_images} images processed, {total_augmented} augmented images generated")
+            # 1. 加载原始图像（强制转为RGB，确保格式正确）
             try:
-                image = Image.open(img_path).convert("RGB")
+                # 用PIL打开并强制转为RGB（解决RGBA/灰度图问题）
+                with Image.open(img_path) as img:
+                    image = img.convert('RGB')  # 关键：统一转为RGB
             except Exception as e:
-                logger.warning(f"Failed to load image {img_path}: {e}")
+                logger.warning(f"Failed to load original image {img_path}: {e}")
                 continue
 
-            # 打印当前处理的图像（每10张或最后一张时提示进度）
-            if idx % 1000 == 0 or idx == total_images: \
-                logger.info(f"Progress: {idx}/{total_images} images processed, {total_augmented} augmented images generated")
+            # 2. 构建输出路径（用Path自动处理Windows路径分隔符）
+            rel_path = img_path.relative_to(input_path)  # 相对路径，保留类别结构
+            target_dir = output_path / rel_path.parent  # 目标类别目录
+            target_dir.mkdir(parents=True, exist_ok=True)  # 确保目录存在
 
-            # Determine output subdirectory
-            rel_dir = img_path.parent.relative_to(input_path)
-            target_dir = output_path / rel_dir
-            if not target_dir.exists():
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save original if requested
+            # 3. 保存原始图像（若需要）
             if self.save_original:
-                orig_name = f"orig_{img_path.name}"
-                image.save(target_dir / orig_name)
+                orig_name = f"orig_{rel_path.name}"
+                orig_save_path = target_dir / orig_name
+                try:
+                    # 显式指定PNG格式，确保文件完整写入
+                    with open(orig_save_path, 'wb') as f:
+                        image.save(f, format='PNG')  # 强制PNG格式
+                    # 验证保存结果
+                    with Image.open(orig_save_path) as verify_img:
+                        verify_img.load()  # 不仅verify，实际加载图像
+                except Exception as e:
+                    logger.error(f"Failed to save original image {orig_save_path}: {e}")
+                    if orig_save_path.exists():
+                        os.remove(orig_save_path)  # 删除损坏文件
+                    continue
 
-            # Generate and save augmented versions
+            # 4. 生成并保存增强图像
             for i in range(self.augmentations_per_image):
-                augmented = self.augment_image(image.copy())
-                aug_name = f"aug_{i}_{img_path.name}"
-                augmented.save(target_dir / aug_name)
-                total_augmented += 1
+                try:
+                    # 增强图像（确保输出是PIL图像）
+                    augmented_img = self.augment_image(image.copy())
+                    # 构建增强图像文件名
+                    aug_name = f"aug_{i}_{rel_path.name}"
+                    aug_save_path = target_dir / aug_name
+
+                    # 保存增强图像（强制PNG格式）
+                    with open(aug_save_path, 'wb') as f:
+                        augmented_img.save(f, format='PNG')  # 显式格式
+
+                    # 严格验证：加载图像并检查尺寸（确保非空）
+                    with Image.open(aug_save_path) as verify_img:
+                        verify_img.load()  # 实际加载像素
+                        if verify_img.size != (32, 32):  # 确保尺寸正确（CIFAR图像32x32）
+                            raise ValueError(f"Image size mismatch: {verify_img.size}, expected (32,32)")
+
+                    total_augmented += 1
+                except Exception as e:
+                    logger.error(f"Failed to save augmented image {aug_save_path}: {e}")
+                    if aug_save_path.exists():
+                        os.remove(aug_save_path)  # 删除损坏文件
+                    continue
 
         logger.info(
             f"Augmentation completed! Total processed images: {total_images}, Total augmented images generated: {total_augmented}. Output saved to: {output_dir}"

@@ -9,6 +9,9 @@ import os
 from torch.amp import autocast, GradScaler
 import torch.cuda.amp as amp
 
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, smoothing=0.1):
         super(LabelSmoothingLoss, self).__init__()
@@ -23,68 +26,102 @@ class LabelSmoothingLoss(nn.Module):
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
         return loss.mean()
 
-def load_transforms():
+
+class EarlyStopping:
+    """标准化早停机制（防止过拟合，验证损失连续不下降则停止）"""
+    def __init__(self, patience=15, min_delta=0.001):
+        self.patience = patience  # 容忍次数
+        self.min_delta = min_delta  # 最小改进阈值
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0  # 重置计数器
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+
+def load_transforms(is_train: bool = True):
     """
-    Load the data transformations
+    Load the data transformations（区分训练/测试集，修正水平翻转类名）
+    Args:
+        is_train: True for training transforms (with augmentation), False for test
     """
-    return transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
+    if is_train:
+        return transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+        ])
 
 
 def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
     """
-    Load the data from the data directory and split it into training and validation sets
-
-    Args:
-        data_dir: The directory to load the data from
-        batch_size: The batch size to use for the data loaders
-        dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
-        pin_memory: Whether to use pinned memory for data loading
-    Returns:
-        train_loader: The training data loader
-        val_loader: The validation data loader
+    修正：先划分原始数据为训练/验证集，再仅对训练集增强，避免数据泄露
     """
-    # Define data transformations: resize, convert to tensor, and normalize
-    data_transforms = load_transforms()
+    # 1. 加载原始数据集（不应用增强，仅基础变换）
+    base_transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+    ])
+    full_dataset = datasets.ImageFolder(root=data_dir, transform=base_transform)
 
-    # Load the full dataset from the augmented data directory
-    full_dataset = datasets.ImageFolder(root=data_dir, transform=data_transforms)
-
-    # Split the dataset into training and validation sets (80/20 split)
+    # 2. 划分训练/验证集索引（基于原始数据，无增强）
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator()
+    train_indices, val_indices = random_split(
+        range(len(full_dataset)), [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # 固定种子确保划分稳定
     )
 
-    # 减少num_workers以降低内存使用
+    # 3. 对训练集应用增强，验证集保持原始变换
+    train_transform = load_transforms(is_train=True)  # 含增强的训练变换
+    val_transform = load_transforms(is_train=False)    # 无增强的验证变换
+
+    # 4. 创建带不同变换的训练/验证子集
+    train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
+    train_dataset.dataset.transform = train_transform  # 训练集覆盖为增强变换
+
+    val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+    val_dataset.dataset.transform = val_transform      # 验证集保持无增强
+
+    # 5. 创建DataLoader
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,  # 从8减少到2
+        num_workers=2,
         pin_memory=pin_memory,
-        persistent_workers=False  # 关闭持久化worker以减少内存
+        persistent_workers=False
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,  # 从4减少到2
+        num_workers=2,
         pin_memory=pin_memory,
         persistent_workers=False
     )
 
-    # Print dataset summary
+    # 打印数据集信息
     print(f"Dataset loaded from: {data_dir}")
-    print(f"Total images: {len(full_dataset)}")
-    print(f"Number of classes: {len(full_dataset.classes)}")
-    print(f"Training set size: {len(train_dataset)}")
-    print(f"Validation set size: {len(val_dataset)}")
+    print(f"Total原始图像数: {len(full_dataset)}")
+    print(f"训练集大小（含增强）: {len(train_dataset)}")
+    print(f"验证集大小（无增强）: {len(val_dataset)}")
+    print(f"类别数: {len(full_dataset.classes)}")
 
     return train_loader, val_loader
 
@@ -96,22 +133,18 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
     Args:
         model: The model to train
         lr: Learning rate
-        weight_decay: Weight decay
+        weight_decay: Weight decay (L2 regularization)
         dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
     Returns:
         criterion: The loss function
         optimizer: The optimizer
         scheduler: The scheduler
     """
-    # criterion = nn.CrossEntropyLoss()
-
-    criterion = LabelSmoothingLoss(smoothing=0.1)
+    criterion = LabelSmoothingLoss(smoothing=0.1)  # 标签平滑（已用，继续保留）
 
     # Adjust optimizer settings for CIFAR-100 (more classes require different optimization)
     if dataset_type == "CIFAR-100":
-        # optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
-        # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=80, eta_min=1e-6)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
     else:
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
