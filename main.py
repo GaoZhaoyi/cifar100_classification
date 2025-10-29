@@ -49,6 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # 在set_random_seeds函数后添加GPU优化
 def optimize_gpu_settings():
     """Optimize GPU settings for faster training"""
@@ -56,7 +57,7 @@ def optimize_gpu_settings():
         cudnn.benchmark = True  # 启用cudnn自动调优
         cudnn.deterministic = False  # 关闭确定性以提高速度
         print(f"Using GPU: {torch.cuda.get_device_name()}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 3:.1f} GB")
 
 
 def set_random_seeds(seed):
@@ -124,6 +125,14 @@ def parse_args():
     parser.add_argument("--pin_memory", action="store_true", default=True,
                         help="Use pinned memory for data loading")
 
+    # 跳过步骤
+    parser.add_argument("--skip_data_prep", action="store_true",
+                        help="Skip data collection and augmentation steps")
+    parser.add_argument("--skip_collection", action="store_true",
+                        help="Skip data collection step")
+    parser.add_argument("--skip_augmentation", action="store_true",
+                        help="Skip data augmentation step")
+
     return parser.parse_args()
 
 
@@ -159,6 +168,7 @@ def augment_data(args):
     if not os.path.exists(raw_data_dir):
         print(f"❌ Error: Raw data directory '{raw_data_dir}' not found.")
         print("Please ensure you have run 'collect_data' first.")
+        return False
     else:
         print(f"✅ Found raw data at: {raw_data_dir}")
         print(f"   Augmented data will be saved to: {augmented_data_dir}")
@@ -173,10 +183,10 @@ def augment_data(args):
             augmentations_per_image=augmentations_per_image
         )
         print("\n🎉 Data augmentation completed successfully!")
+        return True
     else:
         print("Skipping augmentation process due to missing raw data directory.")
-
-    return augmented_data_dir
+        return False
 
 
 def build_model(args):
@@ -219,9 +229,18 @@ def train(args, model: nn.Module):
     print(
         f"Training configured for {args.num_epochs} epochs with early stopping patience of {args.early_stopping_patience}.")
 
-    # Load data
-    # train_loader, val_loader = load_data(args.data_dir + "/augmented/train", args.batch_size, dataset_type, pin_memory=True)
-    train_loader, val_loader = load_data(args.data_dir + "/raw/train", args.batch_size, dataset_type, pin_memory=True)
+    # Load data - 优先使用增强数据，如果不存在则使用原始数据
+    augmented_data_path = args.data_dir + "/augmented/train"
+    raw_data_path = args.data_dir + "/raw/train"
+
+    if os.path.exists(augmented_data_path):
+        print(f"Using augmented data from: {augmented_data_path}")
+        train_loader, val_loader = load_data(augmented_data_path, args.batch_size, dataset_type, pin_memory=True)
+    elif os.path.exists(raw_data_path):
+        print(f"Using raw data from: {raw_data_path} (no augmentation)")
+        train_loader, val_loader = load_data(raw_data_path, args.batch_size, dataset_type, pin_memory=True)
+    else:
+        raise FileNotFoundError(f"Neither augmented data nor raw data found in {args.data_dir}")
 
     print("Starting training...")
     for epoch in range(args.num_epochs):
@@ -231,7 +250,6 @@ def train(args, model: nn.Module):
         )
 
         # 每2个epoch验证一次，而不是每个epoch都验证（最后几个epoch除外）
-        # if epoch % 2 == 0 or epoch >= args.num_epochs - 15 or epoch == args.num_epochs - 1:
         if epoch % 2 == 0 or epoch >= args.num_epochs - 15 or epoch == args.num_epochs - 1:
             # Validate the model
             val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device, dataset_type)
@@ -240,9 +258,9 @@ def train(args, model: nn.Module):
             train_val_gap = train_acc - val_acc
             if train_val_gap > 15.0:  # 训练和验证准确率差距超过15%
                 overfitting_counter += 1
-                print(f" !!!  Overfitting detected! Gap: {train_val_gap:.2f}%")
+                print(f"  ⚠️  Overfitting detected! Gap: {train_val_gap:.2f}%")
                 if overfitting_counter >= max_overfitting_patience:
-                    print(f"\n!!! Severe overfitting detected! Stopping training.")
+                    print(f"\n🚨 Severe overfitting detected! Stopping training.")
                     break
             else:
                 overfitting_counter = 0  # 重置计数器
@@ -404,10 +422,16 @@ def main():
     for arg, value in vars(args).items():
         logger.info(f"  {arg}: {value}")
 
-    # Collect data
-    collect_data(args)
-    # Augment data
-    augment_data(args)
+    # 如果不跳过数据准备，则执行数据收集和增强
+    if not args.skip_data_prep:
+        # 如果不跳过收集，则收集数据
+        if not args.skip_collection:
+            collect_data(args)
+
+        # 如果不跳过增强，则进行数据增强
+        if not args.skip_augmentation:
+            augment_data(args)
+
     # Build model
     model = build_model(args)
     # Train
