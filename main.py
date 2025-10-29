@@ -220,7 +220,8 @@ def train(args, model: nn.Module):
         f"Training configured for {args.num_epochs} epochs with early stopping patience of {args.early_stopping_patience}.")
 
     # Load data
-    train_loader, val_loader = load_data(args.data_dir + "/augmented/train", args.batch_size, dataset_type, pin_memory=True)
+    # train_loader, val_loader = load_data(args.data_dir + "/augmented/train", args.batch_size, dataset_type, pin_memory=True)
+    train_loader, val_loader = load_data(args.data_dir + "/raw/train", args.batch_size, dataset_type, pin_memory=True)
 
     print("Starting training...")
     for epoch in range(args.num_epochs):
