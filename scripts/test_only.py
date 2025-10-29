@@ -41,7 +41,7 @@ def parse_args():
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for evaluation (cuda/cpu)")
-    parser.add_argument("--batch_size", type=int, default=128,
+    parser.add_argument("--batch_size", type=int, default=1024,
                         help="Batch size for evaluation")
 
     # Model checkpoint

@@ -87,7 +87,7 @@ def parse_args():
                         help="Directory to save results")
 
     # Data augmentation
-    parser.add_argument("--aug_count", type=int, default=8,
+    parser.add_argument("--aug_count", type=int, default=4,
                         help="Number of augmentations per image")
 
     # Training parameters
