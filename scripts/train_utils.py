@@ -173,7 +173,7 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
     # 使用SGD优化器，适合CIFAR-100
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
     # 使用StepLR调度器，更快收敛
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=80, eta_min=1e-6)
 
     return criterion, optimizer, scheduler
 

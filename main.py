@@ -224,7 +224,7 @@ def augment_data(args):
     print(f"   Valid data will be used directly from: {split_valid_dir}")
     print(f"   Number of augmentations per image: {args.aug_count}")
 
-    # 强制重新生成增强数据（只处理训练集）
+    # 强制生成增强数据（只处理训练集）
     if os.path.exists(augmented_train_dir):
         shutil.rmtree(augmented_train_dir)
 
