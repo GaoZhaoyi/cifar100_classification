@@ -148,11 +148,17 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True, us
         persistent_workers=False
     )
 
+    is_augmented_data = "augmented" in data_dir
+
     print(f"Dataset loaded from: {data_dir}")
     print(f"Total images: {len(full_dataset)}")
-    print(
-        f"Training set size: {len(train_dataset)} {'(with augmentation)' if use_augmentation else '(without augmentation)'}")
-    print(f"Validation set size: {len(val_dataset)} (without augmentation)")
+    if is_augmented_data:
+        print(f"Training set size: {len(train_dataset)} (with pre-augmentation)")
+    elif use_augmentation:
+        print(f"Training set size: {len(train_dataset)} (with runtime augmentation)")
+    else:
+        print(f"Training set size: {len(train_dataset)} (without augmentation)")
+        print(f"Validation set size: {len(val_dataset)} (without augmentation)")
     print(f"Number of classes: {len(full_dataset.classes)}")
 
     return train_loader, val_loader

@@ -6,17 +6,18 @@ import logging
 import os
 import random
 import numpy as np
+import shutil
 
 import torch
 import torch.nn as nn
 from sklearn.metrics import classification_report
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets
 import torch.backends.cudnn as cudnn
 
 # Import our custom modules
 from scripts.data_download import download_and_extract_cifar10_data, download_and_extract_cifar100_data
-from scripts.data_augmentation import augment_dataset
+from scripts.data_augmentation import augment_train_dataset
 from scripts.model_architectures import create_model
 from scripts.train_utils import (
     save_metrics,
@@ -25,16 +26,12 @@ from scripts.train_utils import (
     test_epoch,
     save_checkpoint,
     define_loss_and_optimizer,
-    load_data,
-    load_transforms,
     EarlyStopping
 )
 from scripts.evaluation_metrics import (
     evaluate_model,
     top_k_accuracy,
-    plot_confusion_matrix,
     calculate_per_class_accuracy,
-    plot_top_k_accuracy,
 )
 
 # 设置环境变量解决CuBLAS确定性警告
@@ -52,12 +49,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# 在set_random_seeds函数后添加GPU优化
 def optimize_gpu_settings():
     """Optimize GPU settings for faster training"""
     if torch.cuda.is_available():
-        cudnn.benchmark = True  # 启用cudnn自动调优
-        cudnn.deterministic = False  # 关闭确定性以提高速度
+        cudnn.benchmark = True
+        cudnn.deterministic = False
         print(f"Using GPU: {torch.cuda.get_device_name()}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 3:.1f} GB")
 
@@ -76,9 +72,6 @@ def set_random_seeds(seed):
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="CIFAR-10/100 Training Pipeline")
-
-    # Dataset selection
     parser = argparse.ArgumentParser(description="CIFAR-10/100 Training Pipeline")
 
     # Dataset selection
@@ -126,10 +119,6 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
 
-    # 锁页内存
-    parser.add_argument("--pin_memory", action="store_true", default=True,
-                        help="Use pinned memory for data loading")
-
     # 跳过步骤
     parser.add_argument("--skip_data_prep", action="store_true",
                         help="Skip data collection and augmentation steps")
@@ -142,10 +131,9 @@ def parse_args():
 
 
 def collect_data(args):
-    """Collect data（传入区分训练/测试的transform）"""
+    """Collect data and pre-split into train/valid/test"""
     logger.info(f"Collecting {args.dataset} dataset...")
 
-    # Create the directory for our raw data if it doesn't already exist
     print("Preparing data directory...")
     os.makedirs(args.data_dir + "/raw", exist_ok=True)
     print("Setup complete.")
@@ -156,61 +144,128 @@ def collect_data(args):
             transform=None,
             save_images=True
         )
+        num_classes = 10
     else:
         train_dataset, test_dataset = download_and_extract_cifar100_data(
             root_dir=args.data_dir + "/raw",
             transform=None,
             save_images=True
         )
+        num_classes = 100
+
+    # 预先划分训练数据为 train/valid
+    raw_train_dir = args.data_dir + "/raw/train"
+    split_train_dir = args.data_dir + "/raw/split/train"
+    split_valid_dir = args.data_dir + "/raw/split/valid"
+
+    if not os.path.exists(split_train_dir) or not os.path.exists(split_valid_dir):
+        print("🚀 Pre-splitting training data into train/valid...")
+        pre_split_train_data(raw_train_dir, split_train_dir, split_valid_dir, num_classes)
+        print("✅ Pre-splitting completed!")
+    else:
+        print("✅ Train/valid data already pre-split")
+
+
+def pre_split_train_data(raw_train_dir, split_train_dir, split_valid_dir, num_classes):
+    """预先将训练数据划分为训练集和验证集"""
+    # 获取所有类别
+    class_names = os.listdir(raw_train_dir)
+
+    # 创建目录结构
+    for class_name in class_names:
+        os.makedirs(os.path.join(split_train_dir, class_name), exist_ok=True)
+        os.makedirs(os.path.join(split_valid_dir, class_name), exist_ok=True)
+
+    # 对每个类别进行划分
+    for class_name in class_names:
+        class_dir = os.path.join(raw_train_dir, class_name)
+        train_class_dir = os.path.join(split_train_dir, class_name)
+        valid_class_dir = os.path.join(split_valid_dir, class_name)
+
+        # 获取该类别的所有图像
+        image_files = [f for f in os.listdir(class_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+
+        # 随机打乱
+        random.shuffle(image_files)
+
+        # 90% 训练, 10% 验证 (对于CIFAR-100: 45000训练, 5000验证)
+        split_idx = int(0.9 * len(image_files))
+        train_files = image_files[:split_idx]
+        valid_files = image_files[split_idx:]
+
+        # 复制文件
+        for file in train_files:
+            shutil.copy2(os.path.join(class_dir, file), os.path.join(train_class_dir, file))
+        for file in valid_files:
+            shutil.copy2(os.path.join(class_dir, file), os.path.join(valid_class_dir, file))
+
+        print(f"Class {class_name}: {len(train_files)} train, {len(valid_files)} valid")
 
 
 def augment_data(args):
-    """Prepare and augment data"""
-    logger.info(f"Augmenting {args.dataset} dataset...")
+    """Prepare and augment pre-split training data only"""
+    logger.info(f"Augmenting {args.dataset} training data...")
 
-    raw_data_dir = args.data_dir + '/raw/train/'
-    augmented_data_dir = args.data_dir + '/augmented/train/'
-    augmentations_per_image = args.aug_count
+    # 原始划分的数据路径
+    split_train_dir = args.data_dir + '/raw/split/train'  # 预划分的训练集
+    split_valid_dir = args.data_dir + '/raw/split/valid'  # 预划分的验证集
 
-    # --- Path Validation ---
-    # Check if the raw data directory exists before proceeding.
-    if not os.path.exists(raw_data_dir):
-        print(f"❌ Error: Raw data directory '{raw_data_dir}' not found.")
-        print("Please ensure you have run 'collect_data' first.")
+    # 增强后数据路径
+    augmented_train_dir = args.data_dir + '/augmented/train'
+
+    # 检查原始数据目录
+    if not os.path.exists(split_train_dir):
+        print(f"❌ Error: Pre-split train data directory not found: {split_train_dir}")
         return False
-    else:
-        print(f"✅ Found raw data at: {raw_data_dir}")
-        print(f"   Augmented data will be saved to: {augmented_data_dir}")
-        print(f"   Number of augmentations per image: {augmentations_per_image}")
 
-    # Ensure the raw data directory exists before running
-    if os.path.exists(raw_data_dir):
-        print("🚀 Starting data augmentation...")
-        augment_dataset(
-            input_dir=raw_data_dir,
-            output_dir=augmented_data_dir,
-            augmentations_per_image=augmentations_per_image
+    print(f"✅ Found pre-split train data at: {split_train_dir}")
+    print(f"✅ Found pre-split valid data at: {split_valid_dir}")
+    print(f"   Augmented train will be saved to: {augmented_train_dir}")
+    print(f"   Valid data will be used directly from: {split_valid_dir}")
+    print(f"   Number of augmentations per image: {args.aug_count}")
+
+    # 强制重新生成增强数据（只处理训练集）
+    if os.path.exists(augmented_train_dir):
+        shutil.rmtree(augmented_train_dir)
+
+    try:
+        print("🚀 Starting training data augmentation...")
+        # 只处理训练数据（应用增强）
+        augment_train_dataset(
+            train_input_dir=split_train_dir,
+            train_output_dir=augmented_train_dir,
+            augmentations_per_image=args.aug_count
         )
-        print("\n🎉 Data augmentation completed successfully!")
-        return True
-    else:
-        print("Skipping augmentation process due to missing raw data directory.")
+
+        print("\n🎉 Training data augmentation completed successfully!")
+
+        # 验证生成的数据
+        if os.path.exists(augmented_train_dir):
+            train_count = sum([len(files) for r, d, files in os.walk(augmented_train_dir)])
+            print(f"📊 Generated {train_count} augmented train images")
+            print(f"📊 Valid data will be used directly from: {split_valid_dir}")
+            return True
+        else:
+            print("❌ Error: Augmented train directory was not created")
+            return False
+
+    except Exception as e:
+        print(f"❌ Error during training data augmentation: {e}")
         return False
 
 
 def build_model(args):
-    """Build the model（启用预训练权重）"""
+    """Build the model"""
     if args.dataset == "cifar10":
         num_classes = 10
     else:
         num_classes = 100
     logger.info(f"Creating model with {num_classes} classes, {args.device} device...")
-    # 对ResNet启用预训练权重，减少过拟合
     model = create_model(
         num_classes=num_classes,
         device=args.device,
         model_type=args.model_type,
-        pretrained=(args.model_type.startswith('resnet'))  # ResNet使用预训练权重
+        pretrained=(args.model_type.startswith('resnet'))
     )
     return model
 
@@ -239,34 +294,60 @@ def train(args, model: nn.Module):
     print(
         f"Training configured for {args.num_epochs} epochs with early stopping patience of {args.early_stopping_patience}.")
 
-    # 智能选择数据源 - 关键修复
-    augmented_data_path = args.data_dir + "/augmented/train"
-    raw_data_path = args.data_dir + "/raw/train"
+    # 直接加载预处理好的数据（无运行时增强）
+    augmented_train_path = args.data_dir + "/augmented/train"  # 增强的训练数据
+    valid_path = args.data_dir + "/raw/split/valid"  # 原始验证数据（未增强）
+    test_path = args.data_dir + "/raw/test"  # 原始测试数据（未增强）
 
-    augmented_train_path = args.data_dir + "/augmented/train"
-    raw_train_path = args.data_dir + "/raw/train"
+    print(f"✅ Loading pre-processed AUGMENTED training data from: {augmented_train_path}")
+    print(f"✅ Loading ORIGINAL validation data from: {valid_path}")
+    print(f"✅ Loading ORIGINAL test data from: {test_path}")
 
-    if os.path.exists(augmented_train_path) and not args.skip_augmentation:
-        print(f"✅ Using augmented training data from: {augmented_train_path}")
-        print(f"✅ Using raw validation data from: {raw_train_path}")
+    # 定义基础变换（无增强）
+    from torchvision import transforms
+    from scripts.train_utils import CIFAR10_MEAN, CIFAR10_STD
+    base_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+    ])
 
-        # 训练集：使用增强数据（包含原始+增强图像）
-        train_loader, _ = load_data(augmented_train_path, args.batch_size, dataset_type, pin_memory=True,
-                                    use_augmentation=False)
-        # 验证集：使用原始数据（仅原始图像）
-        _, val_loader = load_data(raw_train_path, args.batch_size, dataset_type, pin_memory=True,
-                                  use_augmentation=False)
-    else:
-        print(f"⚠️  Using raw data for both training and validation: {raw_train_path}")
-        # 都使用原始数据，但训练集应用运行时增强
-        train_loader, val_loader = load_data(raw_train_path, args.batch_size, dataset_type, pin_memory=True,
-                                             use_augmentation=True)
+    # 加载训练数据（已增强）
+    train_dataset = datasets.ImageFolder(root=augmented_train_path, transform=base_transform)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=False
+    )
 
-    # 加载测试数据用于监控
-    test_data_dir = args.data_dir + "/raw/test"
-    test_transform = load_transforms(is_train=False)
-    test_dataset = datasets.ImageFolder(root=test_data_dir, transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    # 加载验证数据（原始数据，无增强）
+    val_dataset = datasets.ImageFolder(root=valid_path, transform=base_transform)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=False
+    )
+
+    # 加载测试数据用于监控（原始数据，无增强）
+    test_dataset = datasets.ImageFolder(root=test_path, transform=base_transform)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=False
+    )
+
+    print(f"Training set size: {len(train_dataset)} (with pre-augmentation)")
+    print(f"Validation set size: {len(val_dataset)} (ORIGINAL, without augmentation)")
+    print(f"Test set size: {len(test_dataset)} (ORIGINAL, without augmentation)")
+    print(f"Number of classes: {len(train_dataset.classes)}")
 
     print("Starting training...")
     for epoch in range(args.num_epochs):
@@ -343,10 +424,15 @@ def evaluate(args, model: nn.Module):
     dataset_type = "CIFAR-10" if args.dataset == "cifar10" else "CIFAR-100"
 
     # Load the test dataset
-    test_data_dir = args.data_dir + "/raw/test"
-    test_transform = load_transforms(is_train=False)
-    test_dataset = datasets.ImageFolder(root=test_data_dir, transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    test_path = args.data_dir + "/raw/test"
+    from torchvision import transforms
+    from scripts.train_utils import CIFAR10_MEAN, CIFAR10_STD
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+    ])
+    test_dataset = datasets.ImageFolder(root=test_path, transform=test_transform)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Set the model to evaluation mode
     model.eval()
