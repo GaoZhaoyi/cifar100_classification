@@ -87,11 +87,13 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
 
     # 3. 对训练集应用增强，验证集保持原始变换
     train_transform = load_transforms(is_train=True)  # 含增强的训练变换
-    val_transform = load_transforms(is_train=False)    # 无增强的验证变换
+    val_transform = load_transforms(is_train=False)  # 无增强的验证变换
 
     # 4. 创建带不同变换的训练/验证子集
     train_dataset = Subset(full_dataset, train_indices)
-    # 为训练集手动设置增强变换
+    val_dataset = Subset(full_dataset, val_indices)  # 修复：正确初始化val_dataset
+
+    # 为训练集和验证集手动设置变换
     class TransformedSubset(torch.utils.data.Dataset):
         def __init__(self, subset, transform=None):
             self.subset = subset
@@ -108,7 +110,7 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
             return len(self.subset)
 
     train_dataset = TransformedSubset(train_dataset, train_transform)
-    val_dataset = TransformedSubset(val_dataset, val_transform)
+    val_dataset = TransformedSubset(val_dataset, val_transform)  # 现在val_dataset已正确定义
 
     # 5. 创建DataLoader
     train_loader = DataLoader(
