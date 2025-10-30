@@ -68,32 +68,38 @@ def load_transforms(is_train: bool = True):
 
 def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
     """
-    修正：先划分原始数据为训练/验证集，再仅对训练集增强，避免数据泄露
+    加载数据并正确划分训练/验证集，确保验证集不使用增强数据
     """
-    # 1. 加载原始数据集（不应用增强，仅基础变换）
+    # 1. 定义基础变换（无增强，用于验证集和部分训练集）
     base_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
     ])
+
+    # 2. 定义训练增强变换
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+    ])
+
+    # 3. 加载完整数据集
     full_dataset = datasets.ImageFolder(root=data_dir, transform=base_transform)
 
-    # 2. 划分训练/验证集索引（基于原始数据，无增强）
-    train_size = int(0.9 * len(full_dataset))  # 增加训练集比例
+    # 4. 划分训练/验证集索引
+    train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_indices, val_indices = random_split(
         range(len(full_dataset)), [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)  # 固定种子确保划分稳定
+        generator=torch.Generator().manual_seed(42)
     )
 
-    # 3. 对训练集应用增强，验证集保持原始变换
-    train_transform = load_transforms(is_train=True)  # 含增强的训练变换
-    val_transform = load_transforms(is_train=False)  # 无增强的验证变换
-
-    # 4. 创建带不同变换的训练/验证子集
+    # 5. 创建训练集和验证集子集
     train_dataset = Subset(full_dataset, train_indices)
-    val_dataset = Subset(full_dataset, val_indices)  # 修复：正确初始化val_dataset
+    val_dataset = Subset(full_dataset, val_indices)  # 验证集使用基础变换
 
-    # 为训练集和验证集手动设置变换
+    # 6. 为训练集应用增强变换的包装器
     class TransformedSubset(torch.utils.data.Dataset):
         def __init__(self, subset, transform=None):
             self.subset = subset
@@ -102,6 +108,7 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         def __getitem__(self, index):
             x, y = self.subset[index]
             if self.transform:
+                # 将tensor转换回PIL图像以便应用增强
                 x = transforms.ToPILImage()(x)
                 x = self.transform(x)
             return x, y
@@ -109,15 +116,17 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         def __len__(self):
             return len(self.subset)
 
+    # 7. 训练集应用增强变换，验证集保持基础变换
     train_dataset = TransformedSubset(train_dataset, train_transform)
-    val_dataset = TransformedSubset(val_dataset, val_transform)  # 现在val_dataset已正确定义
+    # 验证集不应用增强变换
+    # val_dataset 保持使用 base_transform（已在Subset中设置）
 
-    # 5. 创建DataLoader
+    # 8. 创建DataLoader
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,  # 减少num_workers避免内存问题
+        num_workers=4,
         pin_memory=pin_memory,
         persistent_workers=False
     )
@@ -132,10 +141,10 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
 
     # 打印数据集信息
     print(f"Dataset loaded from: {data_dir}")
-    print(f"Total原始图像数: {len(full_dataset)}")
-    print(f"训练集大小（含增强）: {len(train_dataset)}")
-    print(f"验证集大小（无增强）: {len(val_dataset)}")
-    print(f"类别数: {len(full_dataset.classes)}")
+    print(f"Total images: {len(full_dataset)}")
+    print(f"Training set size (with augmentation): {len(train_dataset)}")
+    print(f"Validation set size (without augmentation): {len(val_dataset)}")
+    print(f"Number of classes: {len(full_dataset.classes)}")
 
     return train_loader, val_loader
 
@@ -158,9 +167,9 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
 
     # Adjust optimizer settings for CIFAR-100 (more classes require different optimization)
     if dataset_type == "CIFAR-100":
-        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
-        # 使用余弦退火调度器
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+        # 在训练开始时使用较高的学习率
+        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4, nesterov=True)
+        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[30, 60], gamma=0.1)
     else:
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
