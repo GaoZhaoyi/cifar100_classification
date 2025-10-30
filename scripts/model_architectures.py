@@ -81,6 +81,51 @@ class ResNetForCIFAR(nn.Module):
         return self.resnet(x)
 
 
+# 添加一个更简单的MobileNet风格模型以加快训练
+class FastCNN(nn.Module):
+    """
+    快速CNN架构，专为快速训练设计
+    """
+
+    def __init__(self, num_classes=100):
+        super(FastCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+
 def create_model(num_classes, device, model_type='simple', pretrained=True):
     """
     Create and initialize the model（新增pretrained参数）
@@ -88,11 +133,13 @@ def create_model(num_classes, device, model_type='simple', pretrained=True):
     Args:
         num_classes: Number of classes (10 for CIFAR-10, 100 for CIFAR-100)
         device: Device to put model on
-        model_type: Type of model ('simple', 'resnet18', 'resnet34', 'resnet50')
+        model_type: Type of model ('simple', 'resnet18', 'resnet34', 'resnet50', 'fast')
         pretrained: Whether to use pretrained weights (only for ResNet)
     """
     if model_type == 'simple':
         model = SimpleCNN(num_classes=num_classes)
+    elif model_type == 'fast':
+        model = FastCNN(num_classes=num_classes)
     elif model_type.startswith('resnet'):
         model = ResNetForCIFAR(num_classes=num_classes, resnet_type=model_type, pretrained=pretrained)
     else:

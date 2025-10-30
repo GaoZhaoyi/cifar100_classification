@@ -12,6 +12,7 @@ import torch.cuda.amp as amp
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
+
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, smoothing=0.1):
         super(LabelSmoothingLoss, self).__init__()
@@ -29,6 +30,7 @@ class LabelSmoothingLoss(nn.Module):
 
 class EarlyStopping:
     """标准化早停机制（防止过拟合，验证损失连续不下降则停止）"""
+
     def __init__(self, patience=15, min_delta=0.001):
         self.patience = patience  # 容忍次数
         self.min_delta = min_delta  # 最小改进阈值
@@ -68,26 +70,21 @@ def load_transforms(is_train: bool = True):
 
 def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
     """
-    加载数据并正确划分训练/验证集，确保验证集不使用增强数据
+    修正：正确加载数据，确保验证集不使用增强
     """
-    # 1. 定义基础变换（无增强，用于验证集和部分训练集）
+    # 1. 定义变换
+    train_transform = load_transforms(is_train=True)  # 训练集用增强
+    val_transform = load_transforms(is_train=False)  # 验证集无增强
+
+    # 2. 加载完整数据集（使用基础变换）
     base_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
     ])
 
-    # 2. 定义训练增强变换
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ToTensor(),
-        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
-    ])
-
-    # 3. 加载完整数据集
     full_dataset = datasets.ImageFolder(root=data_dir, transform=base_transform)
 
-    # 4. 划分训练/验证集索引
+    # 3. 划分训练/验证集索引
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_indices, val_indices = random_split(
@@ -95,11 +92,11 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         generator=torch.Generator().manual_seed(42)
     )
 
-    # 5. 创建训练集和验证集子集
+    # 4. 创建子集
     train_dataset = Subset(full_dataset, train_indices)
-    val_dataset = Subset(full_dataset, val_indices)  # 验证集使用基础变换
+    val_dataset = Subset(full_dataset, val_indices)
 
-    # 6. 为训练集应用增强变换的包装器
+    # 5. 为训练集应用增强的包装器
     class TransformedSubset(torch.utils.data.Dataset):
         def __init__(self, subset, transform=None):
             self.subset = subset
@@ -116,12 +113,11 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         def __len__(self):
             return len(self.subset)
 
-    # 7. 训练集应用增强变换，验证集保持基础变换
+    # 6. 训练集应用增强，验证集保持基础变换
     train_dataset = TransformedSubset(train_dataset, train_transform)
-    # 验证集不应用增强变换
-    # val_dataset 保持使用 base_transform（已在Subset中设置）
+    # val_dataset 保持基础变换
 
-    # 8. 创建DataLoader
+    # 7. 创建DataLoader
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -139,7 +135,6 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         persistent_workers=False
     )
 
-    # 打印数据集信息
     print(f"Dataset loaded from: {data_dir}")
     print(f"Total images: {len(full_dataset)}")
     print(f"Training set size (with augmentation): {len(train_dataset)}")
@@ -152,27 +147,13 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
 def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, dataset_type="CIFAR-10"):
     """
     Define the loss function and optimizer
-    This function is similar to the cell 3. Model Configuration in 04_model_training.ipynb
-    Args:
-        model: The model to train
-        lr: Learning rate
-        weight_decay: Weight decay (L2 regularization)
-        dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
-    Returns:
-        criterion: The loss function
-        optimizer: The optimizer
-        scheduler: The scheduler
     """
-    criterion = LabelSmoothingLoss(smoothing=0.1)  # 标签平滑（已用，继续保留）
+    criterion = LabelSmoothingLoss(smoothing=0.1)
 
-    # Adjust optimizer settings for CIFAR-100 (more classes require different optimization)
-    if dataset_type == "CIFAR-100":
-        # 在训练开始时使用较高的学习率
-        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4, nesterov=True)
-        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[30, 60], gamma=0.1)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
+    # 使用SGD优化器，适合CIFAR-100
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
+    # 使用StepLR调度器，更快收敛
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
     return criterion, optimizer, scheduler
 
@@ -180,15 +161,6 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
 def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="CIFAR-10"):
     """
     Train the model for one epoch
-    Args:
-        model: The model to train
-        dataloader: DataLoader for training data
-        criterion: Loss function
-        optimizer: Optimizer
-        device: Device to train on
-        dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
-    Returns:
-        Average loss and accuracy for the epoch
     """
     model.train()
     running_loss = 0.0
@@ -236,14 +208,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="C
 def validate_epoch(model, dataloader, criterion, device, dataset_type="CIFAR-10"):
     """
     Validate the model
-    Args:
-        model: The model to validate
-        dataloader: DataLoader for validation data
-        criterion: Loss function
-        device: Device to validate on
-        dataset_type: Type of dataset ("CIFAR-10" or "CIFAR-100")
-    Returns:
-        Average loss and accuracy for the validation set
     """
     model.eval()
     running_loss = 0.0
@@ -277,12 +241,29 @@ def validate_epoch(model, dataloader, criterion, device, dataset_type="CIFAR-10"
     return epoch_loss, epoch_acc
 
 
+def test_epoch(model, dataloader, criterion, device, dataset_type="CIFAR-10"):
+    """
+    在测试集上评估模型（仅用于监控，不影响训练）
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    accuracy = 100.0 * correct / total
+    return accuracy
+
+
 def save_checkpoint(state, filename):
     """
     Save model checkpoint
-    Args:
-        state: Checkpoint state
-        filename: Path to save checkpoint
     """
     torch.save(state, filename)
 
@@ -290,13 +271,6 @@ def save_checkpoint(state, filename):
 def load_checkpoint(filename, model, optimizer=None, scheduler=None):
     """
     Load model checkpoint
-    Args:
-        filename: Path to checkpoint file
-        model: Model to load weights into
-        optimizer: Optimizer to load state into (optional)
-        scheduler: Scheduler to load state into (optional)
-    Returns:
-        Checkpoint state
     """
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"Checkpoint file {filename} not found")
@@ -316,9 +290,6 @@ def load_checkpoint(filename, model, optimizer=None, scheduler=None):
 def save_metrics(metrics: str, filename: str = "training_metrics.txt"):
     """
     Save training metrics to a file
-    Args:
-        metrics: Metrics string to save
-        filename: Path to save metrics
     """
     with open(filename, 'w') as f:
         f.write(metrics)
@@ -327,11 +298,6 @@ def save_metrics(metrics: str, filename: str = "training_metrics.txt"):
 def get_class_weights(dataset, num_classes):
     """
     Calculate class weights for imbalanced datasets
-    Args:
-        dataset: The dataset
-        num_classes: Number of classes
-    Returns:
-        Class weights tensor
     """
     # Count samples per class
     class_counts = [0] * num_classes
@@ -348,10 +314,6 @@ def get_class_weights(dataset, num_classes):
 def warmup_lr_scheduler(optimizer, warmup_epochs, warmup_factor):
     """
     Create a warmup learning rate scheduler
-    Args:
-        optimizer: The optimizer
-        warmup_epochs: Number of warmup epochs
-        warmup_factor: Warmup factor
     """
 
     def f(epoch):
