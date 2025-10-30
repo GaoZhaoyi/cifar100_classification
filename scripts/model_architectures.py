@@ -63,7 +63,7 @@ class ResNetForCIFAR(nn.Module):
         # 分类器前添加Dropout层（正则化）
         num_features = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
-            nn.Dropout(p=0.6),  # 全连接层前添加Dropout，抑制过拟合
+            nn.Dropout(p=0.2),  # 全连接层前添加Dropout，抑制过拟合
             nn.Linear(num_features, num_classes)
         )
 
