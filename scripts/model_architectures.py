@@ -40,10 +40,10 @@ class SimpleCNN(nn.Module):
 
 class ResNetForCIFAR(nn.Module):
     """
-    Modified ResNet architecture for CIFAR datasets（添加正则化）
+    Modified ResNet architecture for CIFAR100 datasets（添加正则化）
     """
 
-    def __init__(self, num_classes=10, resnet_type='resnet18', pretrained=True):
+    def __init__(self, num_classes=100, resnet_type='resnet34', pretrained=True):
         super(ResNetForCIFAR, self).__init__()
 
         # 加载预训练权重（默认使用ImageNet预训练，减少过拟合）
@@ -63,13 +63,13 @@ class ResNetForCIFAR(nn.Module):
         # 分类器前添加Dropout层（正则化）
         num_features = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
-            nn.Dropout(p=0.5),  # 全连接层前添加Dropout，抑制过拟合
+            nn.Dropout(p=0.6),  # 全连接层前添加Dropout，抑制过拟合
             nn.Linear(num_features, num_classes)
         )
 
         # 可选：冻结前2层卷积（减少参数更新，适用于小数据集）
         if pretrained and resnet_type == 'resnet50':
-            for param in list(self.resnet.parameters())[:20]:  # 冻结前20个参数组（约前2层）
+            for param in list(self.resnet.parameters())[:8]:  # 冻结前20个参数组（约前2层）
                 param.requires_grad = False
 
     def forward(self, x):

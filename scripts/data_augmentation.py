@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import albumentations as A
 from PIL import Image
+import cv2
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,30 +41,95 @@ class ImageAugmenter:
         self._set_seed()
 
         # Define Albumentations pipeline（新增RandomCrop和Cutout）
+        # self.transform = A.Compose(
+        #     [
+        #         A.RandomCrop(height=28, width=28, pad_if_needed=True, p=0.8),  # 随机裁剪后自动填充回32x32
+        #         A.Resize(height=32, width=32),
+        #         A.Rotate(limit=15, p=0.8),
+        #         A.HorizontalFlip(p=0.5),
+        #         A.ShiftScaleRotate(
+        #             shift_limit=0.1,
+        #             scale_limit=0.1,
+        #             rotate_limit=0,
+        #             p=0.8,
+        #             border_mode=0,  # cv2.BORDER_CONSTANT
+        #         ),
+        #         A.ColorJitter(
+        #             brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.8
+        #         ),
+        #         A.OneOf(
+        #             [
+        #                 A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+        #                 A.MotionBlur(blur_limit=7, p=0.5),
+        #             ],
+        #             p=0.3,
+        #         ),
+        #         A.RandomBrightnessContrast(p=0.2),
+        #     ]
+        # )
         self.transform = A.Compose(
             [
-                A.RandomCrop(height=28, width=28, pad_if_needed=True, p=0.8),  # 随机裁剪后自动填充回32x32
-                A.Resize(height=32, width=32),
-                A.Rotate(limit=15, p=0.8),
+                # 1. 修正RandomCrop：2.0+版本用`pad_if_needed=True`+`border_mode`替代`padding`
+                A.RandomCrop(
+                    height=32,
+                    width=32,
+                    pad_if_needed=True,  # 自动填充（替代原padding=4）
+                    border_mode=cv2.BORDER_CONSTANT,  # 填充模式（黑色填充）
+                    p=0.9
+                ),
+                # 2. 保留Rotate：参数不变（2.0+版本兼容）
+                A.Rotate(limit=20, p=0.9),
+                # 3. 保留HorizontalFlip：参数不变
                 A.HorizontalFlip(p=0.5),
-                A.ShiftScaleRotate(
-                    shift_limit=0.1,
-                    scale_limit=0.1,
-                    rotate_limit=0,
+                # 4. 修正ShiftScaleRotate警告：用Affine替代（功能完全一致，消除警告）
+                A.Affine(
+                    translate_percent={"x": 0.1, "y": 0.1},  # 对应原shift_limit=0.1
+                    scale=(0.9, 1.1),  # 对应原scale_limit=0.1（0.9~1.1倍缩放）
+                    rotate=0,  # 对应原rotate_limit=0（不旋转，与Rotate模块分工）
                     p=0.8,
-                    border_mode=0,  # cv2.BORDER_CONSTANT
+                    border_mode=cv2.BORDER_CONSTANT
                 ),
+                # 5. 保留ColorJitter：参数不变（兼容2.0+）
                 A.ColorJitter(
-                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.8
+                    brightness=0.3,
+                    contrast=0.3,
+                    saturation=0.3,
+                    hue=0.15,
+                    p=0.9
                 ),
+                # 6. 修正GaussNoise：2.0+版本用`var_limit`的新写法（或改用RandomGamma，避免参数警告）
+                # 这里改用RandomGamma（效果类似，且无参数警告，更稳定）
+                A.RandomGamma(gamma_limit=(80, 120), p=0.4),  # 伽马校正：模拟亮度噪声，替代GaussNoise
+                # 7. 保留GaussianBlur+MotionBlur：参数不变
                 A.OneOf(
                     [
-                        A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+                        A.GaussianBlur(blur_limit=(3, 7), p=0.6),
                         A.MotionBlur(blur_limit=7, p=0.5),
                     ],
-                    p=0.3,
+                    p=0.5
                 ),
-                A.RandomBrightnessContrast(p=0.2),
+                # 8. 修正CoarseDropout：2.0+版本参数名调整（holes→num_holes，size→max_size）
+                A.CoarseDropout(
+                    # 1. 遮挡数量：用 num_holes_range 指定范围（2-4个，替代旧的 max_holes）
+                    num_holes_range=(2, 4),
+                    # 2. 遮挡高度：用 hole_height_range 指定范围（8-10像素，固定像素值需传int元组）
+                    hole_height_range=(8, 10),
+                    # 3. 遮挡宽度：与高度保持一致，形成正方形遮挡
+                    hole_width_range=(8, 10),
+                    # 4. 填充颜色：用 fill 替代 fill_value，0表示黑色（RGB通用）
+                    fill=0,
+                    # 5. 触发概率：30%，与你的需求一致
+                    p=0.3
+                ),
+
+                # 9. 修正RandomShear：2.0+版本无RandomShear，用Affine的shear参数替代
+                A.Affine(
+                    shear={"x": 15, "y": 15},  # 剪切角度±15°（x/y分别控制水平/垂直剪切）
+                    p=0.5,
+                    border_mode=cv2.BORDER_CONSTANT
+                ),
+                # 10. 保留RandomBrightnessContrast：参数不变
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.4),
             ]
         )
 

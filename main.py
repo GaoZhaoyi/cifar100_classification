@@ -270,7 +270,7 @@ def train(args, model: nn.Module):
         )
 
         # 每2个epoch验证一次，而不是每个epoch都验证（最后几个epoch除外）
-        if epoch % 2 == 0 or epoch >= args.num_epochs - 15 or epoch == args.num_epochs - 1:
+        if epoch:
             # Validate the model
             val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device, dataset_type)
 
