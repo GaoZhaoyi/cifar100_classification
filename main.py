@@ -89,14 +89,24 @@ def parse_args():
                         help="Number of augmentations per image")
 
     # Training parameters
-    parser.add_argument("--batch_size", type=int, default=512,
+    parser.add_argument("--batch_size", type=int, default=128,  # 降低批次大小
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=60,
+    parser.add_argument("--num_epochs", type=int, default=200,  # 增加训练轮数
                         help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.05,
+    parser.add_argument("--lr", type=float, default=0.1,  # 调整学习率
                         help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=5e-4,
                         help="Weight decay (L2 penalty)")
+
+    # Mixup/CutMix参数
+    parser.add_argument("--use_mixup", action="store_true",
+                        help="Use Mixup data augmentation")
+    parser.add_argument("--use_cutmix", action="store_true",
+                        help="Use CutMix data augmentation")
+    parser.add_argument("--mixup_prob", type=float, default=0.5,
+                        help="Probability of applying Mixup")
+    parser.add_argument("--cutmix_prob", type=float, default=0.5,
+                        help="Probability of applying CutMix")
 
     # Model configuration
     parser.add_argument("--model_type", type=str, default="resnet18",
@@ -106,13 +116,13 @@ def parse_args():
     # Checkpointing
     parser.add_argument("--save_freq", type=int, default=1,
                         help="Save checkpoint every N epochs")
-    parser.add_argument("--early_stopping_patience", type=int, default=15,
+    parser.add_argument("--early_stopping_patience", type=int, default=50,  # 增加耐心
                         help="Early stopping patience")
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training (cuda/cpu)")
-    parser.add_argument("--num_workers", type=int, default=8,
+    parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of data loading workers")
 
     # Random seeds
@@ -128,6 +138,7 @@ def parse_args():
                         help="Skip data augmentation step")
 
     return parser.parse_args()
+
 
 
 def collect_data(args):
@@ -274,10 +285,22 @@ def train(args, model: nn.Module):
     # Determine dataset type for logging
     dataset_type = "CIFAR-10" if args.dataset == "cifar10" else "CIFAR-100"
 
+    # 初始化Mixup和CutMix
+    mixup = Mixup(alpha=0.2) if hasattr(args, 'use_mixup') and args.use_mixup else None
+    cutmix = CutMix(alpha=1.0) if hasattr(args, 'use_cutmix') and args.use_cutmix else None
+
+    # 设置Mixup/CutMix应用概率
+    mixup_prob = getattr(args, 'mixup_prob', 0.3)
+    cutmix_prob = getattr(args, 'cutmix_prob', 0.3)
+
     # Define loss and optimizer
     criterion, optimizer, scheduler = define_loss_and_optimizer(model, args.lr, args.weight_decay, dataset_type)
 
-    # 初始化早停器
+    # 调整学习率调度器
+    from torch.optim import lr_scheduler
+    scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+
+    # 初始化早停器（增加耐心）
     early_stopping = EarlyStopping(
         patience=args.early_stopping_patience,
         min_delta=0.001
@@ -351,9 +374,10 @@ def train(args, model: nn.Module):
 
     print("Starting training...")
     for epoch in range(args.num_epochs):
-        # Train for one epoch
+        # Train for one epoch with Mixup/CutMix
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, args.device, dataset_type
+            model, train_loader, criterion, optimizer, args.device, dataset_type,
+            mixup=mixup, cutmix=cutmix, mixup_prob=mixup_prob, cutmix_prob=cutmix_prob
         )
 
         # Validate the model

@@ -8,10 +8,79 @@ from tqdm import tqdm
 import os
 from torch.amp import autocast, GradScaler
 import torch.cuda.amp as amp
+import numpy as np
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
+
+class Mixup:
+    """Mixup数据增强"""
+
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha
+
+    def __call__(self, x, y):
+        if self.alpha > 0:
+            lam = np.random.beta(self.alpha, self.alpha)
+        else:
+            lam = 1
+
+        batch_size = x.size(0)
+        index = torch.randperm(batch_size).to(x.device)
+
+        mixed_x = lam * x + (1 - lam) * x[index, :]
+        y_a, y_b = y, y[index]
+        return mixed_x, y_a, y_b, lam
+
+    def mixup_criterion(self, criterion, pred, y_a, y_b, lam):
+        return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
+class CutMix:
+    """CutMix数据增强"""
+
+    def __init__(self, alpha=1.0):
+        self.alpha = alpha
+
+    def __call__(self, x, y):
+        if self.alpha > 0:
+            lam = np.random.beta(self.alpha, self.alpha)
+        else:
+            lam = 1
+
+        batch_size = x.size(0)
+        index = torch.randperm(batch_size).to(x.device)
+
+        bbx1, bby1, bbx2, bby2 = self.rand_bbox(x.size(), lam)
+        x[:, :, bbx1:bbx2, bby1:bby2] = x[index, :, bbx1:bbx2, bby1:bby2]
+
+        # 调整lambda以匹配像素比例
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (x.size()[-1] * x.size()[-2]))
+
+        y_a, y_b = y, y[index]
+        return x, y_a, y_b, lam
+
+    def rand_bbox(self, size, lam):
+        W = size[2]
+        H = size[3]
+        cut_rat = np.sqrt(1. - lam)
+        cut_w = int(W * cut_rat)
+        cut_h = int(H * cut_rat)
+
+        # 均匀分布bbox位置
+        cx = np.random.randint(W)
+        cy = np.random.randint(H)
+
+        bbx1 = np.clip(cx - cut_w // 2, 0, W)
+        bby1 = np.clip(cy - cut_h // 2, 0, H)
+        bbx2 = np.clip(cx + cut_w // 2, 0, W)
+        bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+        return bbx1, bby1, bbx2, bby2
+
+    def mixup_criterion(self, criterion, pred, y_a, y_b, lam):
+        return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, smoothing=0.1):
@@ -166,21 +235,23 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True, us
 
 def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, dataset_type="CIFAR-10"):
     """
-    Define the loss function and optimizer
+    Define the loss function and optimizer with better configuration for CIFAR-100
     """
     criterion = LabelSmoothingLoss(smoothing=0.1)
 
     # 使用SGD优化器，适合CIFAR-100
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
-    # 使用StepLR调度器，更快收敛
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=80, eta_min=1e-6)
+
+    # 使用CosineAnnealingWarmRestarts调度器，带warmup
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
     return criterion, optimizer, scheduler
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="CIFAR-10"):
+def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="CIFAR-10",
+                mixup=None, cutmix=None, mixup_prob=0.0, cutmix_prob=0.0):
     """
-    Train the model for one epoch
+    Train the model for one epoch with Mixup/CutMix support
     """
     model.train()
     running_loss = 0.0
@@ -195,13 +266,26 @@ def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="C
     for inputs, labels in progress_bar:
         inputs, labels = inputs.to(device), labels.to(device)
 
+        # 应用Mixup或CutMix
+        if mixup is not None and np.random.rand() < mixup_prob:
+            inputs, targets_a, targets_b, lam = mixup(inputs, labels)
+            use_mixup = True
+        elif cutmix is not None and np.random.rand() < cutmix_prob:
+            inputs, targets_a, targets_b, lam = cutmix(inputs, labels)
+            use_mixup = True
+        else:
+            use_mixup = False
+
         # Zero the parameter gradients
         optimizer.zero_grad()
 
         # 使用混合精度训练
         with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            if use_mixup:
+                loss = mixup.mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
+            else:
+                loss = criterion(outputs, labels)
 
         # Backward pass with gradient scaling
         scaler.scale(loss).backward()
@@ -210,9 +294,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="C
 
         # Statistics
         running_loss += loss.item() * inputs.size(0)
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
+        if not use_mixup:
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+        else:
+            # Mixup情况下使用概率计算准确率
+            total += labels.size(0)
+            # 简化处理：只计算第一个目标的准确率
+            _, predicted = outputs.max(1)
+            correct += (lam * predicted.eq(targets_a).sum().float() +
+                       (1 - lam) * predicted.eq(targets_b).sum().float()).item()
 
         # Update progress bar
         progress_bar.set_postfix(
