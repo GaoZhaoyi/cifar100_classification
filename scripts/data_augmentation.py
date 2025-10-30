@@ -67,6 +67,7 @@ class ImageAugmenter:
         #         A.RandomBrightnessContrast(p=0.2),
         #     ]
         # )
+
         self.transform = A.Compose(
             [
                 # 1. 修正RandomCrop：2.0+版本用`pad_if_needed=True`+`border_mode`替代`padding`

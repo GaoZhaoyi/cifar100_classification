@@ -55,7 +55,10 @@ class ResNetForCIFAR(nn.Module):
             self.resnet = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if pretrained else None)
         else:
             raise ValueError(f"Unsupported ResNet type: {resnet_type}")
-
+            # 可选：冻结前2层卷积（减少参数更新，适用于小数据集）
+        if pretrained and resnet_type == 'resnet50':
+            for param in list(self.resnet.parameters())[:4]:  # 冻结前20个参数组（约前2层）
+                param.requires_grad = False
         # Modify first layer for CIFAR (32x32 images instead of 224x224)
         self.resnet.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.resnet.maxpool = nn.Identity()  # Remove maxpool for CIFAR
@@ -63,14 +66,9 @@ class ResNetForCIFAR(nn.Module):
         # 分类器前添加Dropout层（正则化）
         num_features = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
-            nn.Dropout(p=0.2),  # 全连接层前添加Dropout，抑制过拟合
+            nn.Dropout(p=0.4),  # 全连接层前添加Dropout，抑制过拟合
             nn.Linear(num_features, num_classes)
         )
-
-        # 可选：冻结前2层卷积（减少参数更新，适用于小数据集）
-        if pretrained and resnet_type == 'resnet50':
-            for param in list(self.resnet.parameters())[:8]:  # 冻结前20个参数组（约前2层）
-                param.requires_grad = False
 
     def forward(self, x):
         return self.resnet(x)
