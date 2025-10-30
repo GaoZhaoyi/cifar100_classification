@@ -232,12 +232,6 @@ def train(args, model: nn.Module):
     best_val_loss = float("inf")
     best_val_acc = 0.0
 
-    # Lists to store training history
-    train_losses = []
-    val_losses = []
-    train_accuracies = []
-    val_accuracies = []
-
     # Create directories
     os.makedirs(args.output_dir + "/models", exist_ok=True)
     os.makedirs(args.output_dir + "/results", exist_ok=True)
@@ -245,18 +239,28 @@ def train(args, model: nn.Module):
     print(
         f"Training configured for {args.num_epochs} epochs with early stopping patience of {args.early_stopping_patience}.")
 
-    # Load data - 优先使用增强数据，如果不存在则使用原始数据
+    # 智能选择数据源 - 关键修复
     augmented_data_path = args.data_dir + "/augmented/train"
     raw_data_path = args.data_dir + "/raw/train"
 
-    if os.path.exists(augmented_data_path):
-        print(f"Using augmented data from: {augmented_data_path}")
-        train_loader, val_loader = load_data(augmented_data_path, args.batch_size, dataset_type, pin_memory=True)
-    elif os.path.exists(raw_data_path):
-        print(f"Using raw data from: {raw_data_path} (no augmentation)")
-        train_loader, val_loader = load_data(raw_data_path, args.batch_size, dataset_type, pin_memory=True)
+    augmented_train_path = args.data_dir + "/augmented/train"
+    raw_train_path = args.data_dir + "/raw/train"
+
+    if os.path.exists(augmented_train_path) and not args.skip_augmentation:
+        print(f"✅ Using augmented training data from: {augmented_train_path}")
+        print(f"✅ Using raw validation data from: {raw_train_path}")
+
+        # 训练集：使用增强数据（包含原始+增强图像）
+        train_loader, _ = load_data(augmented_train_path, args.batch_size, dataset_type, pin_memory=True,
+                                    use_augmentation=False)
+        # 验证集：使用原始数据（仅原始图像）
+        _, val_loader = load_data(raw_train_path, args.batch_size, dataset_type, pin_memory=True,
+                                  use_augmentation=False)
     else:
-        raise FileNotFoundError(f"Neither augmented data nor raw data found in {args.data_dir}")
+        print(f"⚠️  Using raw data for both training and validation: {raw_train_path}")
+        # 都使用原始数据，但训练集应用运行时增强
+        train_loader, val_loader = load_data(raw_train_path, args.batch_size, dataset_type, pin_memory=True,
+                                             use_augmentation=True)
 
     # 加载测试数据用于监控
     test_data_dir = args.data_dir + "/raw/test"
@@ -277,12 +281,6 @@ def train(args, model: nn.Module):
         # Update learning rate
         if hasattr(scheduler, 'step'):
             scheduler.step()
-
-        # Store metrics
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
 
         # Print epoch summary
         print(f"Epoch {epoch + 1}/{args.num_epochs}:")

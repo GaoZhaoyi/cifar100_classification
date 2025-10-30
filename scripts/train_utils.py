@@ -68,23 +68,35 @@ def load_transforms(is_train: bool = True):
         ])
 
 
-def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
+def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True, use_augmentation=False):
     """
-    修正：正确加载数据，确保验证集不使用增强
-    """
-    # 1. 定义变换
-    train_transform = load_transforms(is_train=True)  # 训练集用增强
-    val_transform = load_transforms(is_train=False)  # 验证集无增强
+    加载数据并正确划分训练/验证集
 
-    # 2. 加载完整数据集（使用基础变换）
+    Args:
+        data_dir: 数据目录路径
+        batch_size: 批次大小
+        dataset_type: 数据集类型
+        pin_memory: 是否使用锁页内存
+        use_augmentation: 是否对训练集应用数据增强
+    """
+    # 1. 定义基础变换（无增强，用于验证集和测试集）
     base_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
     ])
 
+    # 2. 定义训练增强变换（仅用于训练集）
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
+    ])
+
+    # 3. 加载完整数据集
     full_dataset = datasets.ImageFolder(root=data_dir, transform=base_transform)
 
-    # 3. 划分训练/验证集索引
+    # 4. 划分训练/验证集索引
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_indices, val_indices = random_split(
@@ -92,30 +104,31 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         generator=torch.Generator().manual_seed(42)
     )
 
-    # 4. 创建子集
+    # 5. 创建训练集和验证集子集
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
 
-    # 5. 为训练集应用增强的包装器
-    class TransformedSubset(torch.utils.data.Dataset):
-        def __init__(self, subset, transform=None):
-            self.subset = subset
-            self.transform = transform
+    # 6. 为训练集应用增强变换的包装器（仅当需要时）
+    if use_augmentation:
+        class TransformedSubset(torch.utils.data.Dataset):
+            def __init__(self, subset, transform=None):
+                self.subset = subset
+                self.transform = transform
 
-        def __getitem__(self, index):
-            x, y = self.subset[index]
-            if self.transform:
-                # 将tensor转换回PIL图像以便应用增强
-                x = transforms.ToPILImage()(x)
-                x = self.transform(x)
-            return x, y
+            def __getitem__(self, index):
+                x, y = self.subset[index]
+                if self.transform:
+                    # 将tensor转换回PIL图像以便应用增强
+                    x = transforms.ToPILImage()(x)
+                    x = self.transform(x)
+                return x, y
 
-        def __len__(self):
-            return len(self.subset)
+            def __len__(self):
+                return len(self.subset)
 
-    # 6. 训练集应用增强，验证集保持基础变换
-    train_dataset = TransformedSubset(train_dataset, train_transform)
-    # val_dataset 保持基础变换
+        # 训练集应用增强变换
+        train_dataset = TransformedSubset(train_dataset, train_transform)
+        # 验证集保持基础变换（无增强）
 
     # 7. 创建DataLoader
     train_loader = DataLoader(
@@ -137,8 +150,9 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
 
     print(f"Dataset loaded from: {data_dir}")
     print(f"Total images: {len(full_dataset)}")
-    print(f"Training set size (with augmentation): {len(train_dataset)}")
-    print(f"Validation set size (without augmentation): {len(val_dataset)}")
+    print(
+        f"Training set size: {len(train_dataset)} {'(with augmentation)' if use_augmentation else '(without augmentation)'}")
+    print(f"Validation set size: {len(val_dataset)} (without augmentation)")
     print(f"Number of classes: {len(full_dataset.classes)}")
 
     return train_loader, val_loader
