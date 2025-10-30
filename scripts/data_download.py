@@ -63,14 +63,14 @@ class CIFAR10Downloader:
         if is_train:
             return transforms.Compose([
                 transforms.RandomCrop(32, padding=4),
-                transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
+                transforms.RandomHorizontalFlip(p=0.5),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
             ])
         else:
             return transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
             ])
 
     def load_datasets(self) -> Tuple[CIFAR10, CIFAR10]:
@@ -235,7 +235,7 @@ class CIFAR100Downloader:
         if is_train:
             return transforms.Compose([
                 transforms.RandomCrop(32, padding=4),
-                transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
+                transforms.RandomHorizontalFlip(p=0.5),
                 transforms.ToTensor(),
                 transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
             ])

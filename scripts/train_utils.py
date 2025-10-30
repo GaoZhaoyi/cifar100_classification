@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from tqdm import tqdm
 import os
 from torch.amp import autocast, GradScaler
@@ -55,13 +55,12 @@ def load_transforms(is_train: bool = True):
     if is_train:
         return transforms.Compose([
             transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(p=0.5),  # 修正：HorizontalFlip → RandomHorizontalFlip
+            transforms.RandomHorizontalFlip(p=0.5),
             transforms.ToTensor(),
             transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
         ])
     else:
         return transforms.Compose([
-            transforms.Resize((32, 32)),
             transforms.ToTensor(),
             transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
         ])
@@ -73,14 +72,13 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
     """
     # 1. 加载原始数据集（不应用增强，仅基础变换）
     base_transform = transforms.Compose([
-        transforms.Resize((32, 32)),
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
     ])
     full_dataset = datasets.ImageFolder(root=data_dir, transform=base_transform)
 
     # 2. 划分训练/验证集索引（基于原始数据，无增强）
-    train_size = int(0.8 * len(full_dataset))
+    train_size = int(0.9 * len(full_dataset))  # 增加训练集比例
     val_size = len(full_dataset) - train_size
     train_indices, val_indices = random_split(
         range(len(full_dataset)), [train_size, val_size],
@@ -92,18 +90,32 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
     val_transform = load_transforms(is_train=False)    # 无增强的验证变换
 
     # 4. 创建带不同变换的训练/验证子集
-    train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
-    train_dataset.dataset.transform = train_transform  # 训练集覆盖为增强变换
+    train_dataset = Subset(full_dataset, train_indices)
+    # 为训练集手动设置增强变换
+    class TransformedSubset(torch.utils.data.Dataset):
+        def __init__(self, subset, transform=None):
+            self.subset = subset
+            self.transform = transform
 
-    val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
-    val_dataset.dataset.transform = val_transform      # 验证集保持无增强
+        def __getitem__(self, index):
+            x, y = self.subset[index]
+            if self.transform:
+                x = transforms.ToPILImage()(x)
+                x = self.transform(x)
+            return x, y
+
+        def __len__(self):
+            return len(self.subset)
+
+    train_dataset = TransformedSubset(train_dataset, train_transform)
+    val_dataset = TransformedSubset(val_dataset, val_transform)
 
     # 5. 创建DataLoader
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
+        num_workers=4,  # 减少num_workers避免内存问题
         pin_memory=pin_memory,
         persistent_workers=False
     )
@@ -111,7 +123,7 @@ def load_data(data_dir, batch_size, dataset_type="CIFAR-10", pin_memory=True):
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=4,
         pin_memory=pin_memory,
         persistent_workers=False
     )
@@ -145,7 +157,8 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float, 
     # Adjust optimizer settings for CIFAR-100 (more classes require different optimization)
     if dataset_type == "CIFAR-100":
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15, eta_min=1e-7)     # T_max 需要设置为训练轮数
+        # 使用余弦退火调度器
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
     else:
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
@@ -183,7 +196,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, dataset_type="C
         optimizer.zero_grad()
 
         # 使用混合精度训练
-        with autocast(device_type='cuda'):
+        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
             outputs = model(inputs)
             loss = criterion(outputs, labels)
 

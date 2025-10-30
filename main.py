@@ -92,17 +92,17 @@ def parse_args():
                         help="Number of augmentations per image")
 
     # Training parameters
-    parser.add_argument("--batch_size", type=int, default=1024,
+    parser.add_argument("--batch_size", type=int, default=256,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=80,
+    parser.add_argument("--num_epochs", type=int, default=100,
                         help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.1,
+    parser.add_argument("--lr", type=float, default=0.05,
                         help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=5e-4,
                         help="Weight decay (L2 penalty)")
 
     # Model configuration
-    parser.add_argument("--model_type", type=str, default="resnet50",
+    parser.add_argument("--model_type", type=str, default="resnet34",
                         choices=["simple", "resnet18", "resnet34", "resnet50"],
                         help="Model architecture to use")
 
@@ -115,7 +115,7 @@ def parse_args():
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training (cuda/cpu)")
-    parser.add_argument("--num_workers", type=int, default=16,
+    parser.add_argument("--num_workers", type=int, default=8,
                         help="Number of data loading workers")
 
     # Random seeds
@@ -232,10 +232,6 @@ def train(args, model: nn.Module):
     best_val_loss = float("inf")
     best_val_acc = 0.0
 
-    # 添加过拟合检测变量
-    overfitting_counter = 0
-    max_overfitting_patience = 5  # 连续5次过拟合则停止
-
     # Lists to store training history for later plotting
     train_losses = []
     val_losses = []
@@ -269,84 +265,50 @@ def train(args, model: nn.Module):
             model, train_loader, criterion, optimizer, args.device, dataset_type
         )
 
-        # 每2个epoch验证一次，而不是每个epoch都验证（最后几个epoch除外）
-        if epoch:
-            # Validate the model
-            val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device, dataset_type)
+        # Validate the model
+        val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device, dataset_type)
 
-            # 检查过拟合（训练准确率比验证准确率高太多）
-            train_val_gap = train_acc - val_acc
-            if train_val_gap > 15.0 and epoch > args.num_epochs-25:  # 训练和验证准确率差距超过15%
-                overfitting_counter += 1
-                print(f"  ⚠️  Overfitting detected! Gap: {train_val_gap:.2f}%")
-                if overfitting_counter >= max_overfitting_patience:
-                    print(f"\n🚨 Severe overfitting detected! Stopping training.")
-                    break
+        # Update learning rate based on validation loss or epoch
+        if hasattr(scheduler, 'step'):
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss)
             else:
-                overfitting_counter = 0  # 重置计数器
-
-            # Update learning rate based on validation loss or epoch
-            if hasattr(scheduler, 'step'):
-                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    scheduler.step(val_loss)
-                else:
-                    scheduler.step()
-
-            # Store metrics for plotting
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            train_accuracies.append(train_acc)
-            val_accuracies.append(val_acc)
-
-            # Print epoch summary
-            print(f"Epoch {epoch + 1}/{args.num_epochs}:")
-            print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-            print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
-            print(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
-
-            # 早停检查
-            early_stopping(val_loss)
-            if early_stopping.early_stop:
-                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
-                break
-
-            # Check for improvement and save the best model
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_val_loss = val_loss
-                save_checkpoint(
-                    {
-                        "epoch": epoch + 1,
-                        "state_dict": model.state_dict(),
-                        "best_val_acc": best_val_acc,
-                        "best_val_loss": best_val_loss,
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict() if hasattr(scheduler, 'state_dict') else None,
-                    },
-                    args.output_dir + "/models/best_model.pth",
-                )
-                print("  ↳ Validation accuracy improved. Saving best model!")
-
-        else:
-            # 只打印训练信息，不进行验证
-            print(f"Epoch {epoch + 1}/{args.num_epochs}:")
-            print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-            print(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
-
-            # 学习率仍然更新（如果是基于epoch的调度器）
-            if hasattr(scheduler, 'step') and not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step()
 
-            # 存储训练指标用于绘图
-            train_losses.append(train_loss)
-            train_accuracies.append(train_acc)
-            # 验证指标保持上一次的值或使用插值
-            if val_losses:
-                val_losses.append(val_losses[-1])
-                val_accuracies.append(val_accuracies[-1])
-            else:
-                val_losses.append(train_loss)
-                val_accuracies.append(train_acc)
+        # Store metrics for plotting
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
+
+        # Print epoch summary
+        print(f"Epoch {epoch + 1}/{args.num_epochs}:")
+        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+        print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        print(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+        # 早停检查
+        early_stopping(val_loss)
+        if early_stopping.early_stop:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+            break
+
+        # Check for improvement and save the best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_val_loss = val_loss
+            save_checkpoint(
+                {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_val_acc": best_val_acc,
+                    "best_val_loss": best_val_loss,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict() if hasattr(scheduler, 'state_dict') else None,
+                },
+                args.output_dir + "/models/best_model.pth",
+            )
+            print("  ↳ Validation accuracy improved. Saving best model!")
 
     print("\nTraining completed!")
 
@@ -378,7 +340,7 @@ def evaluate(args, model: nn.Module):
     test_data_dir = args.data_dir + "/raw/test"
     test_transform = load_transforms(is_train=False)
     test_dataset = datasets.ImageFolder(root=test_data_dir, transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     # Set the model to evaluation mode
     model.eval()
